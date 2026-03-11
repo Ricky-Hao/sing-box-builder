@@ -37,13 +37,16 @@ jobs:
     outputs:
       exists: ${{ steps.check.outputs.exists }}
     steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
       - name: Check whether release already exists in this repository
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if gh release view "${{ needs.prepare.outputs.latest_tag }}" >/dev/null 2>&1; then
+          if gh release view "${{ needs.prepare.outputs.latest_tag }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -69,7 +72,7 @@ jobs:
     env:
       REPO: SagerNet/sing-box
       REF: ${{ needs.prepare.outputs.latest_tag }}
-      TAGS: with_gvisor with_quic with_utls with_clash_api with_tailscale
+      TAGS: with_gvisor with_quic with_utls with_clash_api
       VERSION: ${{ needs.prepare.outputs.version }}
 
     steps:
@@ -124,11 +127,19 @@ jobs:
     if: needs.check_release.outputs.exists == 'false'
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Show downloaded files
+        run: |
+          set -euo pipefail
+          find artifacts -maxdepth 2 -type f | sort
 
       - name: Create release in this repository
         env:
@@ -137,5 +148,6 @@ jobs:
           set -euo pipefail
           gh release create "${{ needs.prepare.outputs.latest_tag }}" \
             artifacts/* \
+            --repo "${{ github.repository }}" \
             --title "sing-box ${{ needs.prepare.outputs.latest_tag }}" \
-            --notes "Automated build of SagerNet/sing-box ${{ needs.prepare.outputs.latest_tag }} for linux-amd64-musl and linux-arm64-musl with tags: with_gvisor with_quic with_utls with_clash_api with_tailscale"
+            --notes "Automated build of SagerNet/sing-box ${{ needs.prepare.outputs.latest_tag }} for linux-amd64-musl and linux-arm64-musl with tags: with_gvisor with_quic with_utls with_clash_api"
