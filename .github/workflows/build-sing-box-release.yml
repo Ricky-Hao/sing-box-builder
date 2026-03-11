@@ -1,0 +1,141 @@
+name: build sing-box latest release
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      latest_tag: ${{ steps.latest.outputs.tag }}
+      version: ${{ steps.latest.outputs.version }}
+    steps:
+      - name: Get latest upstream release
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          API_URL="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+          JSON=$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${API_URL}")
+          TAG=$(printf '%s' "${JSON}" | jq -r '.tag_name')
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+  check_release:
+    needs: prepare
+    runs-on: ubuntu-latest
+    outputs:
+      exists: ${{ steps.check.outputs.exists }}
+    steps:
+      - name: Check whether release already exists in this repository
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "${{ needs.prepare.outputs.latest_tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs:
+      - prepare
+      - check_release
+    if: needs.check_release.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact_name: linux-amd64-musl
+            goos: linux
+            goarch: amd64
+          - artifact_name: linux-arm64-musl
+            goos: linux
+            goarch: arm64
+
+    env:
+      REPO: SagerNet/sing-box
+      REF: ${{ needs.prepare.outputs.latest_tag }}
+      TAGS: with_gvisor with_quic with_utls with_clash_api with_tailscale
+      VERSION: ${{ needs.prepare.outputs.version }}
+
+    steps:
+      - name: Checkout upstream repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPO }}
+          ref: ${{ env.REF }}
+          path: sing-box
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: sing-box/go.mod
+          cache-dependency-path: sing-box/go.sum
+
+      - name: Build
+        working-directory: sing-box
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          OUT="dist/sing-box-${VERSION}-${{ matrix.artifact_name }}"
+
+          go build -v -trimpath \
+            -tags "${TAGS}" \
+            -ldflags "-X github.com/sagernet/sing-box/constant.Version=${VERSION} -s -w -buildid=" \
+            -o "${OUT}" \
+            ./cmd/sing-box
+
+          sha256sum "${OUT}" > "${OUT}.sha256"
+
+          ls -lh "${OUT}" "${OUT}.sha256"
+          file "${OUT}" || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sing-box-${{ env.VERSION }}-${{ matrix.artifact_name }}
+          path: |
+            sing-box/dist/sing-box-${{ env.VERSION }}-${{ matrix.artifact_name }}
+            sing-box/dist/sing-box-${{ env.VERSION }}-${{ matrix.artifact_name }}.sha256
+
+  release:
+    needs:
+      - prepare
+      - check_release
+      - build
+    if: needs.check_release.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release in this repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ needs.prepare.outputs.latest_tag }}" \
+            artifacts/* \
+            --title "sing-box ${{ needs.prepare.outputs.latest_tag }}" \
+            --notes "Automated build of SagerNet/sing-box ${{ needs.prepare.outputs.latest_tag }} for linux-amd64-musl and linux-arm64-musl with tags: with_gvisor with_quic with_utls with_clash_api with_tailscale"
